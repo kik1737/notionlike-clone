@@ -36,6 +36,7 @@ import {
   isEmptyBlockContent,
   normalizeBlockContent,
   plainTextToHtml,
+  sanitizeBlockHtml,
   type InlineFormat,
 } from '@/lib/utils/text-format'
 
@@ -73,6 +74,30 @@ const BLOCK_PLACEHOLDERS: Record<BlockType, string> = {
   divider: '',
 }
 
+const SLASH_MENU_WIDTH = 288
+const SLASH_MENU_MAX_HEIGHT = 320
+const SLASH_MENU_ITEM_HEIGHT = 48
+const SLASH_MENU_HEADER_HEIGHT = 40
+
+function computeSlashMenuPosition(rect: DOMRect, menuHeight: number) {
+  let top = rect.bottom + 4
+  let left = rect.left
+
+  if (top + menuHeight > window.innerHeight - 8) {
+    top = rect.top - menuHeight - 4
+  }
+  if (top < 8) {
+    top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuHeight - 8))
+  }
+
+  if (left + SLASH_MENU_WIDTH > window.innerWidth - 8) {
+    left = window.innerWidth - SLASH_MENU_WIDTH - 8
+  }
+  if (left < 8) left = 8
+
+  return { top, left }
+}
+
 const SLASH_COMMANDS = [
   { type: 'heading1' as BlockType, icon: Heading1, label: '제목 1', description: '대형 섹션 제목' },
   { type: 'heading2' as BlockType, icon: Heading2, label: '제목 2', description: '중간 섹션 제목' },
@@ -105,6 +130,7 @@ function RichTextBlockEditor({
 }) {
   const [hovered, setHovered] = useState(false)
   const initializedRef = useRef(false)
+  const editorElRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef(block.content)
   contentRef.current = block.content
 
@@ -122,6 +148,7 @@ function RichTextBlockEditor({
 
   const setRef = useCallback(
     (el: HTMLDivElement | null) => {
+      editorElRef.current = el
       setEditorRef(el)
       if (el && !initializedRef.current) {
         el.innerHTML = normalizeBlockContent(contentRef.current)
@@ -133,7 +160,21 @@ function RichTextBlockEditor({
 
   useEffect(() => {
     initializedRef.current = false
+    editorElRef.current = null
   }, [block.id])
+
+  useEffect(() => {
+    const el = editorElRef.current
+    if (!el || !initializedRef.current) return
+
+    const expectedHtml = normalizeBlockContent(block.content)
+    const currentPlain = getPlainTextFromHtml(el.innerHTML)
+    const expectedPlain = getPlainTextFromHtml(expectedHtml)
+
+    if (currentPlain !== expectedPlain) {
+      el.innerHTML = expectedHtml
+    }
+  }, [block.content, block.type])
 
   const isEmpty = isEmptyBlockContent(block.content)
 
@@ -175,7 +216,7 @@ function RichTextBlockEditor({
           ref={setRef}
           contentEditable
           suppressContentEditableWarning
-          onInput={(e) => onUpdate(e.currentTarget.innerHTML)}
+          onInput={(e) => onUpdate(sanitizeBlockHtml(e.currentTarget.innerHTML))}
           onKeyDown={onKeyDown}
           onFocus={onFocus}
           className={cn(
@@ -360,6 +401,7 @@ export function PageEditor({
   const titleRef = useRef(page.title)
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const titleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const slashMenuActiveRef = useRef(false)
 
   useEffect(() => {
     blocksRef.current = blocks
@@ -423,13 +465,37 @@ export function PageEditor({
           sortOrder: index,
         }))
       )
-      setBlocks(
-        saved.map((block) => ({
-          id: block.id,
-          type: block.type,
-          content: block.content,
-        }))
-      )
+      setBlocks((prev) => {
+        let changed = false
+        const next = prev.map((block, index) => {
+          const savedBlock = saved[index]
+          if (!savedBlock) return block
+
+          const content = normalizeBlockContent(savedBlock.content)
+          if (
+            block.id === savedBlock.id &&
+            block.type === savedBlock.type &&
+            block.content === content
+          ) {
+            return block
+          }
+
+          changed = true
+          return {
+            id: savedBlock.id,
+            type: savedBlock.type,
+            content,
+          }
+        })
+
+        return changed ? next : prev
+      })
+      setFocusedBlockId((prev) => {
+        if (!prev?.startsWith('temp-')) return prev
+        const index = blocksToSave.findIndex((block) => block.id === prev)
+        if (index < 0) return prev
+        return saved[index]?.id ?? prev
+      })
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 2000)
     } catch {
@@ -438,11 +504,30 @@ export function PageEditor({
   }, [page.id])
 
   const scheduleBlockSave = useCallback(() => {
+    if (slashMenuActiveRef.current) return
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
     saveTimeoutRef.current = setTimeout(() => {
       persistBlocks(blocksRef.current)
     }, 500)
   }, [persistBlocks])
+
+  const updateSlashMenuPosition = useCallback((blockId: string, commandCount: number) => {
+    const ref = editorRefs.current[blockId]
+    if (!ref) return
+
+    const rect = ref.getBoundingClientRect()
+    const menuHeight = Math.min(
+      SLASH_MENU_HEADER_HEIGHT + commandCount * SLASH_MENU_ITEM_HEIGHT,
+      SLASH_MENU_MAX_HEIGHT
+    )
+    setSlashMenuPos(computeSlashMenuPosition(rect, menuHeight))
+  }, [])
+
+  const closeSlashMenu = useCallback(() => {
+    slashMenuActiveRef.current = false
+    setShowSlashMenu(false)
+    setSlashMenuQuery('')
+  }, [])
 
   const scheduleTitleSave = useCallback(
     (title: string) => {
@@ -523,23 +608,31 @@ export function PageEditor({
 
   const updateBlock = (id: string, content: string) => {
     const plainText = getPlainTextFromHtml(content)
+    const slashIdx = plainText.lastIndexOf('/')
+    const hasSlashCommand =
+      slashIdx >= 0 && !plainText.slice(slashIdx + 1).includes(' ')
 
-    if (plainText.endsWith('/') || plainText.includes('/')) {
-      const slashIdx = plainText.lastIndexOf('/')
+    if (hasSlashCommand) {
       const query = plainText.slice(slashIdx + 1)
-      const ref = editorRefs.current[id]
-      if (ref) {
-        const rect = ref.getBoundingClientRect()
-        setSlashMenuPos({ top: rect.bottom + window.scrollY, left: rect.left + window.scrollX })
-      }
+      slashMenuActiveRef.current = true
       setSlashMenuQuery(query)
       setShowSlashMenu(true)
+      requestAnimationFrame(() => {
+        const commandCount = SLASH_COMMANDS.filter(
+          (cmd) =>
+            query === '' ||
+            cmd.label.toLowerCase().includes(query.toLowerCase())
+        ).length
+        updateSlashMenuPosition(id, commandCount)
+      })
     } else {
-      setShowSlashMenu(false)
+      closeSlashMenu()
     }
 
     setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, content } : b)))
-    scheduleBlockSave()
+    if (!slashMenuActiveRef.current) {
+      scheduleBlockSave()
+    }
   }
 
   const applyFormatToFocusedBlock = useCallback(
@@ -565,7 +658,7 @@ export function PageEditor({
 
       editor.focus()
       applyRichTextFormat(format, linkUrl)
-      updateBlock(blockId, editor.innerHTML)
+      updateBlock(blockId, sanitizeBlockHtml(editor.innerHTML))
     },
     [focusedBlockId, getFocusedEditor, showToast]
   )
@@ -594,7 +687,7 @@ export function PageEditor({
   const handleKeyDown = (e: React.KeyboardEvent, blockId: string) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      setShowSlashMenu(false)
+      closeSlashMenu()
       addBlock(blockId)
     } else if (e.key === 'Backspace') {
       const block = blocks.find((b) => b.id === blockId)
@@ -603,7 +696,11 @@ export function PageEditor({
         deleteBlock(blockId)
       }
     } else if (e.key === 'Escape') {
-      setShowSlashMenu(false)
+      if (slashMenuActiveRef.current) {
+        e.preventDefault()
+        closeSlashMenu()
+        scheduleBlockSave()
+      }
     }
   }
 
@@ -611,17 +708,34 @@ export function PageEditor({
     const block = blocksRef.current.find((b) => b.id === blockId)
     if (!block) return
 
-    const plainText = getPlainTextFromHtml(block.content)
+    const editor = editorRefs.current[blockId]
+    const rawContent =
+      editor instanceof HTMLDivElement
+        ? editor.innerHTML
+        : editor instanceof HTMLTextAreaElement
+          ? editor.value
+          : block.content
+
+    const plainText =
+      editor instanceof HTMLTextAreaElement
+        ? rawContent
+        : getPlainTextFromHtml(rawContent)
+
     const slashIdx = plainText.lastIndexOf('/')
     const nextPlain = slashIdx >= 0 ? plainText.slice(0, slashIdx) : plainText
-    const nextContent = type === 'code' ? nextPlain : plainTextToHtml(nextPlain)
+    const nextContent =
+      type === 'code'
+        ? nextPlain
+        : type === 'divider'
+          ? ''
+          : plainTextToHtml(nextPlain)
 
     setBlocks((prev) =>
       prev.map((b) =>
         b.id === blockId ? { ...b, type, content: nextContent } : b
       )
     )
-    setShowSlashMenu(false)
+    closeSlashMenu()
     scheduleBlockSave()
     setTimeout(() => editorRefs.current[blockId]?.focus(), 50)
   }
@@ -631,6 +745,22 @@ export function PageEditor({
       slashMenuQuery === '' ||
       cmd.label.toLowerCase().includes(slashMenuQuery.toLowerCase())
   )
+
+  useEffect(() => {
+    if (!showSlashMenu || !focusedBlockId) return
+
+    const update = () => {
+      updateSlashMenuPosition(focusedBlockId, filteredCommands.length)
+    }
+
+    update()
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    return () => {
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+    }
+  }, [showSlashMenu, focusedBlockId, filteredCommands.length, updateSlashMenuPosition])
 
   const saveStatusLabel = {
     idle: '',
@@ -845,8 +975,8 @@ export function PageEditor({
 
             {showSlashMenu && filteredCommands.length > 0 && (
               <div
-                className="fixed z-50 w-72 rounded-lg border border-border bg-popover shadow-xl overflow-hidden"
-                style={{ top: slashMenuPos.top + 4, left: slashMenuPos.left }}
+                className="fixed z-50 w-72 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover shadow-xl"
+                style={{ top: slashMenuPos.top, left: slashMenuPos.left }}
               >
                 <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border">
                   기본 블록

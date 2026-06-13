@@ -9,7 +9,41 @@ function escapeHtml(text: string): string {
 }
 
 export function isHtmlContent(content: string): boolean {
-  return /<\/?[a-z][\s\S]*>/i.test(content)
+  return (
+    /<\/?[a-z][\s\S]*>/i.test(content) ||
+    /&(?:nbsp|#\d+|#x[\da-f]+);/i.test(content)
+  )
+}
+
+export function sanitizeBlockHtml(html: string): string {
+  if (!html || html === '<br>' || html === '<div><br></div>') {
+    return ''
+  }
+
+  if (typeof document === 'undefined') {
+    return html
+      .replace(/&amp;nbsp;/gi, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/\u00A0/g, ' ')
+  }
+
+  const div = document.createElement('div')
+  div.innerHTML = html.replace(/&amp;nbsp;/gi, '&nbsp;')
+
+  const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT)
+  let textNode: Node | null
+  while ((textNode = walker.nextNode())) {
+    const text = textNode.textContent
+    if (!text?.includes('\u00A0')) continue
+    textNode.textContent = text.replace(/\u00A0/g, ' ')
+  }
+
+  const serialized = div.innerHTML
+  if (!isHtmlContent(serialized)) {
+    return plainTextToHtml((div.textContent ?? '').replace(/\u00A0/g, ' '))
+  }
+
+  return serialized
 }
 
 export function plainTextToHtml(text: string): string {
@@ -19,15 +53,25 @@ export function plainTextToHtml(text: string): string {
 
 export function normalizeBlockContent(content: string): string {
   if (!content) return ''
-  if (isHtmlContent(content)) return content
+  if (content.includes('&amp;nbsp;')) {
+    content = content.replace(/&amp;nbsp;/gi, ' ')
+  }
+  if (isHtmlContent(content) || content.includes('\u00A0')) {
+    return sanitizeBlockHtml(content)
+  }
   return plainTextToHtml(content)
 }
 
 export function getPlainTextFromHtml(html: string): string {
-  if (typeof document === 'undefined') return html
+  if (typeof document === 'undefined') {
+    return html
+      .replace(/&amp;nbsp;/gi, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/\u00A0/g, ' ')
+  }
   const div = document.createElement('div')
-  div.innerHTML = html
-  return div.textContent ?? ''
+  div.innerHTML = html.replace(/&amp;nbsp;/gi, '&nbsp;')
+  return (div.textContent ?? '').replace(/\u00A0/g, ' ')
 }
 
 export function isEmptyBlockContent(content: string): boolean {
