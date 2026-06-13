@@ -42,6 +42,7 @@ import {
 
 interface Block {
   id: string
+  clientKey: string
   type: BlockType
   content: string
 }
@@ -161,7 +162,7 @@ function RichTextBlockEditor({
   useEffect(() => {
     initializedRef.current = false
     editorElRef.current = null
-  }, [block.id])
+  }, [block.clientKey])
 
   useEffect(() => {
     const el = editorElRef.current
@@ -344,7 +345,13 @@ function BlockComponent({
 }
 
 function createEmptyBlock(): Block {
-  return { id: `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`, type: 'text', content: '' }
+  const clientKey = `ck-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return {
+    id: `temp-${clientKey}`,
+    clientKey,
+    type: 'text',
+    content: '',
+  }
 }
 
 function ToolbarIconButton({
@@ -386,7 +393,7 @@ export function PageEditor({
   onSelectPage,
 }: PageEditorProps) {
   const [blocks, setBlocks] = useState<Block[]>([])
-  const [focusedBlockId, setFocusedBlockId] = useState<string | null>(null)
+  const [focusedClientKey, setFocusedClientKey] = useState<string | null>(null)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [showSlashMenu, setShowSlashMenu] = useState(false)
   const [slashMenuQuery, setSlashMenuQuery] = useState('')
@@ -402,6 +409,7 @@ export function PageEditor({
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const titleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const slashMenuActiveRef = useRef(false)
+  const blockAddActiveRef = useRef(false)
 
   useEffect(() => {
     blocksRef.current = blocks
@@ -421,13 +429,18 @@ export function PageEditor({
   }, [])
 
   const getFocusedEditor = useCallback(() => {
-    if (!focusedBlockId) return null
-    return editorRefs.current[focusedBlockId] ?? null
-  }, [focusedBlockId])
+    if (!focusedClientKey) return null
+    return editorRefs.current[focusedClientKey] ?? null
+  }, [focusedClientKey])
 
-  const setBlockEditorRef = useCallback((id: string, el: HTMLElement | null) => {
-    editorRefs.current[id] = el
+  const setBlockEditorRef = useCallback((clientKey: string, el: HTMLElement | null) => {
+    editorRefs.current[clientKey] = el
   }, [])
+
+  const getBlockByClientKey = useCallback(
+    (clientKey: string) => blocksRef.current.find((block) => block.clientKey === clientKey),
+    []
+  )
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}?page=${page.id}`
@@ -449,8 +462,8 @@ export function PageEditor({
     }
   }, [localTitle, showToast])
 
-  const getOrCreateRef = (id: string) => {
-    return (el: HTMLElement | null) => setBlockEditorRef(id, el)
+  const getOrCreateRef = (clientKey: string) => {
+    return (el: HTMLElement | null) => setBlockEditorRef(clientKey, el)
   }
 
   const persistBlocks = useCallback(async (blocksToSave: Block[]) => {
@@ -483,18 +496,13 @@ export function PageEditor({
           changed = true
           return {
             id: savedBlock.id,
+            clientKey: block.clientKey,
             type: savedBlock.type,
             content,
           }
         })
 
         return changed ? next : prev
-      })
-      setFocusedBlockId((prev) => {
-        if (!prev?.startsWith('temp-')) return prev
-        const index = blocksToSave.findIndex((block) => block.id === prev)
-        if (index < 0) return prev
-        return saved[index]?.id ?? prev
       })
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 2000)
@@ -504,15 +512,15 @@ export function PageEditor({
   }, [page.id])
 
   const scheduleBlockSave = useCallback(() => {
-    if (slashMenuActiveRef.current) return
+    if (slashMenuActiveRef.current || blockAddActiveRef.current) return
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
     saveTimeoutRef.current = setTimeout(() => {
       persistBlocks(blocksRef.current)
     }, 500)
   }, [persistBlocks])
 
-  const updateSlashMenuPosition = useCallback((blockId: string, commandCount: number) => {
-    const ref = editorRefs.current[blockId]
+  const updateSlashMenuPosition = useCallback((clientKey: string, commandCount: number) => {
+    const ref = editorRefs.current[clientKey]
     if (!ref) return
 
     const rect = ref.getBoundingClientRect()
@@ -552,6 +560,7 @@ export function PageEditor({
           setBlocks(
             loaded.map((block) => ({
               id: block.id,
+              clientKey: block.id,
               type: block.type,
               content: normalizeBlockContent(block.content),
             }))
@@ -575,38 +584,63 @@ export function PageEditor({
     }
   }, [page.id, persistBlocks])
 
-  const addBlock = (afterId?: string, type: BlockType = 'text') => {
+  const focusBlockEditor = useCallback((clientKey: string) => {
+    const tryFocus = () => {
+      const editor = editorRefs.current[clientKey]
+      if (editor) {
+        editor.focus()
+        return true
+      }
+      return false
+    }
+
+    if (tryFocus()) return
+
+    requestAnimationFrame(() => {
+      if (!tryFocus()) {
+        requestAnimationFrame(tryFocus)
+      }
+    })
+  }, [])
+
+  const addBlock = (afterClientKey?: string, type: BlockType = 'text') => {
     const newBlock = { ...createEmptyBlock(), type }
+    blockAddActiveRef.current = true
+
     setBlocks((prev) => {
-      if (!afterId) return [...prev, newBlock]
-      const idx = prev.findIndex((b) => b.id === afterId)
+      if (!afterClientKey) return [...prev, newBlock]
+      const idx = prev.findIndex((b) => b.clientKey === afterClientKey)
       const next = [...prev]
       next.splice(idx + 1, 0, newBlock)
       return next
     })
-    setFocusedBlockId(newBlock.id)
-    setTimeout(() => editorRefs.current[newBlock.id]?.focus(), 0)
-    scheduleBlockSave()
-    return newBlock.id
+    setFocusedClientKey(newBlock.clientKey)
+    requestAnimationFrame(() => {
+      focusBlockEditor(newBlock.clientKey)
+      setTimeout(() => {
+        blockAddActiveRef.current = false
+      }, 200)
+    })
+    return newBlock.clientKey
   }
 
-  const deleteBlock = (id: string) => {
+  const deleteBlock = (clientKey: string) => {
     setBlocks((prev) => {
       if (prev.length === 1) return [{ ...createEmptyBlock() }]
-      const idx = prev.findIndex((b) => b.id === id)
-      const newBlocks = prev.filter((b) => b.id !== id)
+      const idx = prev.findIndex((b) => b.clientKey === clientKey)
+      const newBlocks = prev.filter((b) => b.clientKey !== clientKey)
       const focusIdx = Math.max(0, idx - 1)
-      const prevId = newBlocks[focusIdx]?.id
-      if (prevId) {
-        setFocusedBlockId(prevId)
-        setTimeout(() => editorRefs.current[prevId]?.focus(), 0)
+      const prevKey = newBlocks[focusIdx]?.clientKey
+      if (prevKey) {
+        setFocusedClientKey(prevKey)
+        requestAnimationFrame(() => focusBlockEditor(prevKey))
       }
       return newBlocks
     })
     scheduleBlockSave()
   }
 
-  const updateBlock = (id: string, content: string) => {
+  const updateBlock = (clientKey: string, content: string) => {
     const plainText = getPlainTextFromHtml(content)
     const slashIdx = plainText.lastIndexOf('/')
     const hasSlashCommand =
@@ -623,13 +657,15 @@ export function PageEditor({
             query === '' ||
             cmd.label.toLowerCase().includes(query.toLowerCase())
         ).length
-        updateSlashMenuPosition(id, commandCount)
+        updateSlashMenuPosition(clientKey, commandCount)
       })
     } else {
       closeSlashMenu()
     }
 
-    setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, content } : b)))
+    setBlocks((prev) =>
+      prev.map((b) => (b.clientKey === clientKey ? { ...b, content } : b))
+    )
     if (!slashMenuActiveRef.current) {
       scheduleBlockSave()
     }
@@ -637,9 +673,9 @@ export function PageEditor({
 
   const applyFormatToFocusedBlock = useCallback(
     (format: InlineFormat) => {
-      const blockId = focusedBlockId
+      const clientKey = focusedClientKey
       const editor = getFocusedEditor()
-      if (!blockId || !editor) {
+      if (!clientKey || !editor) {
         showToast('서식을 적용할 블록을 먼저 선택하세요.')
         return
       }
@@ -658,9 +694,9 @@ export function PageEditor({
 
       editor.focus()
       applyRichTextFormat(format, linkUrl)
-      updateBlock(blockId, sanitizeBlockHtml(editor.innerHTML))
+      updateBlock(clientKey, sanitizeBlockHtml(editor.innerHTML))
     },
-    [focusedBlockId, getFocusedEditor, showToast]
+    [focusedClientKey, getFocusedEditor, showToast]
   )
 
   useEffect(() => {
@@ -684,16 +720,16 @@ export function PageEditor({
     return () => window.removeEventListener('keydown', handleShortcut)
   }, [applyFormatToFocusedBlock, getFocusedEditor])
 
-  const handleKeyDown = (e: React.KeyboardEvent, blockId: string) => {
+  const handleKeyDown = (e: React.KeyboardEvent, clientKey: string) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       closeSlashMenu()
-      addBlock(blockId)
+      addBlock(clientKey)
     } else if (e.key === 'Backspace') {
-      const block = blocks.find((b) => b.id === blockId)
+      const block = getBlockByClientKey(clientKey)
       if (block && isEmptyBlockContent(block.content)) {
         e.preventDefault()
-        deleteBlock(blockId)
+        deleteBlock(clientKey)
       }
     } else if (e.key === 'Escape') {
       if (slashMenuActiveRef.current) {
@@ -704,11 +740,11 @@ export function PageEditor({
     }
   }
 
-  const applySlashCommand = (type: BlockType, blockId: string) => {
-    const block = blocksRef.current.find((b) => b.id === blockId)
+  const applySlashCommand = (type: BlockType, clientKey: string) => {
+    const block = getBlockByClientKey(clientKey)
     if (!block) return
 
-    const editor = editorRefs.current[blockId]
+    const editor = editorRefs.current[clientKey]
     const rawContent =
       editor instanceof HTMLDivElement
         ? editor.innerHTML
@@ -732,12 +768,12 @@ export function PageEditor({
 
     setBlocks((prev) =>
       prev.map((b) =>
-        b.id === blockId ? { ...b, type, content: nextContent } : b
+        b.clientKey === clientKey ? { ...b, type, content: nextContent } : b
       )
     )
     closeSlashMenu()
     scheduleBlockSave()
-    setTimeout(() => editorRefs.current[blockId]?.focus(), 50)
+    setTimeout(() => focusBlockEditor(clientKey), 50)
   }
 
   const filteredCommands = SLASH_COMMANDS.filter(
@@ -747,10 +783,10 @@ export function PageEditor({
   )
 
   useEffect(() => {
-    if (!showSlashMenu || !focusedBlockId) return
+    if (!showSlashMenu || !focusedClientKey) return
 
     const update = () => {
-      updateSlashMenuPosition(focusedBlockId, filteredCommands.length)
+      updateSlashMenuPosition(focusedClientKey, filteredCommands.length)
     }
 
     update()
@@ -760,7 +796,7 @@ export function PageEditor({
       window.removeEventListener('scroll', update, true)
       window.removeEventListener('resize', update)
     }
-  }, [showSlashMenu, focusedBlockId, filteredCommands.length, updateSlashMenuPosition])
+  }, [showSlashMenu, focusedClientKey, filteredCommands.length, updateSlashMenuPosition])
 
   const saveStatusLabel = {
     idle: '',
@@ -963,13 +999,13 @@ export function PageEditor({
           <div className="relative">
             {blocks.map((block) => (
               <BlockComponent
-                key={block.id}
+                key={block.clientKey}
                 block={block}
-                onUpdate={(content) => updateBlock(block.id, content)}
-                onFocus={() => setFocusedBlockId(block.id)}
-                onKeyDown={(e) => handleKeyDown(e, block.id)}
-                setEditorRef={getOrCreateRef(block.id)}
-                isFocused={focusedBlockId === block.id}
+                onUpdate={(content) => updateBlock(block.clientKey, content)}
+                onFocus={() => setFocusedClientKey(block.clientKey)}
+                onKeyDown={(e) => handleKeyDown(e, block.clientKey)}
+                setEditorRef={getOrCreateRef(block.clientKey)}
+                isFocused={focusedClientKey === block.clientKey}
               />
             ))}
 
@@ -989,8 +1025,8 @@ export function PageEditor({
                       type="button"
                       className="flex w-full items-center gap-3 px-3 py-2 text-sm hover:bg-accent transition-colors text-left"
                       onClick={() => {
-                        if (focusedBlockId) {
-                          applySlashCommand(cmd.type, focusedBlockId)
+                        if (focusedClientKey) {
+                          applySlashCommand(cmd.type, focusedClientKey)
                         }
                       }}
                     >
@@ -1011,7 +1047,8 @@ export function PageEditor({
           <button
             type="button"
             className="mt-1 w-full cursor-text py-2 text-left text-[15px] text-muted-foreground/30 hover:text-muted-foreground/50 transition-colors"
-            onClick={() => addBlock(blocks[blocks.length - 1]?.id)}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => addBlock(blocks[blocks.length - 1]?.clientKey)}
           >
             클릭하여 새 블록 추가...
           </button>
