@@ -132,10 +132,19 @@ export function NotionApp({
 
   const handleAddPage = useCallback(
     async (parentId?: string) => {
-      const result = await createPageAction(parentId)
-      refresh()
-      setSelectedPageId(result.id)
-      setActiveView('editor')
+      try {
+        const result = await createPageAction(parentId)
+        refresh()
+        setSelectedPageId(result.id)
+        setActiveView('editor')
+      } catch (error) {
+        console.error('Failed to create page:', error)
+        alert(
+          error instanceof Error
+            ? error.message
+            : '페이지 생성에 실패했습니다.'
+        )
+      }
     },
     [refresh]
   )

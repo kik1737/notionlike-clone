@@ -3,6 +3,20 @@ import { buildPageTree } from '@/lib/mappers/page-mapper'
 import type { DbPage } from '@/lib/mappers/page-mapper'
 import type { NotionPage } from '@/lib/types/page'
 
+type ParentIdFilter = string | null | undefined
+
+function applyParentIdFilter<
+  T extends {
+    eq: (column: string, value: string) => T
+    is: (column: string, value: null) => T
+  },
+>(query: T, parentId: ParentIdFilter): T {
+  if (parentId) {
+    return query.eq('parent_id', parentId)
+  }
+  return query.is('parent_id', null)
+}
+
 export class PageRepository {
   private async getClient() {
     return createClient()
@@ -74,11 +88,14 @@ export class PageRepository {
       if (expandError) throw new Error(expandError.message)
     }
 
-    const { count, error: countError } = await supabase
-      .from('pages')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('parent_id', data.parentId ?? null)
+    const countQuery = applyParentIdFilter(
+      supabase
+        .from('pages')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId),
+      data.parentId
+    )
+    const { count, error: countError } = await countQuery
 
     if (countError) throw new Error(countError.message)
 
@@ -165,11 +182,14 @@ export class PageRepository {
 
     if (blocksError) throw new Error(blocksError.message)
 
-    const { count, error: countError } = await supabase
-      .from('pages')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('parent_id', page.parent_id)
+    const duplicateCountQuery = applyParentIdFilter(
+      supabase
+        .from('pages')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId),
+      page.parent_id
+    )
+    const { count, error: countError } = await duplicateCountQuery
 
     if (countError) throw new Error(countError.message)
 
